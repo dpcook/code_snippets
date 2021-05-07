@@ -1,0 +1,165 @@
+---
+title: "TCGA gene correlation"
+output: html_notebook
+---
+
+# Goal
+We're going to take TCGA RNA-seq data and find genes correlated to some gene of interest (we'll use integrin beta 4/ITGB4 as an example here). 
+
+**Important Disclaimer:** Interpret this analysis cautiously. Gene-gene correlations in cohorts of expression data derived from tissues are often attributable to cellular composition of the tissue rather than gene regulatory mechanisms. See [Zhang et al., 2021](https://academic.oup.com/bib/article/22/1/127/5669861)  for more on this.
+
+# Dependencies
+```{r}
+library(recount3)
+library(tidyverse)
+library(knitr)
+```
+
+# Load the data
+The folks that developed [*recount*](https://doi.org/10.1038/nbt.3838) have done a ton of woyesrk to uniformally process a ton of RNA-seq data from the literature. They provide an R package to access and work with the data, and also have a [web portal](http://rna.recount.bio) to navigate available studies, including all of the TCGA RNA-seq data.
+
+If you go to the website, you can find a simple text file containing the RNA-seq counts, but we'll access it using their R package.
+
+```{r}
+human_projects <- available_projects() #A list of all available data
+proj_info <- human_projects %>%
+  filter(file_source=="tcga" & project=="BRCA")
+```
+
+We've identified the project we want to pull from their server (ie. the breast cancer TCGA data). We'll use their create_rse() function to download it all. Note that this will download in a bunch of data that you probably don't care about
+
+As an aside, you can view all the possible TCGA datasets to explore:
+```{r}
+human_projects %>% filter(file_source == "tcga") %>% kable()
+```
+
+
+```{r}
+rse <- create_rse(proj_info)
+```
+
+# Normalization
+## Scaling
+To account for differences in sequencing depth between samples, we'll scale the counts to a common denominator (default = 40M)
+```{r}
+assay(rse, "counts") <- transform_counts(rse)
+```
+
+Let's pull the count matrix out of the RangedSummarizedExperiment object so that we can work with it a bit more easily.
+```{r}
+count_matrix <- assay(rse, "counts")
+count_matrix[1:5,1:2]
+```
+
+We can see the genes down the rows and the samples across the columns. The RSE object has metadata for each gene, including the gene symbol corresponding to these Ensembl IDs. I find it more convenient to work with gene symbols, so let's replace the rownames. Because there are rare genes with a single symbol but >1 ensembl ID, the list of gene symbols contains duplicates and will cause R to give an error. We can use the make.unique() function to append ".1", ".2" etc to duplicates
+```{r}
+rownames(count_matrix) <- make.unique(rowData(rse)$gene_name)
+```
+
+```{r}
+count_matrix[1:5,1:2]
+```
+
+We'll also get rid of genes that have no detected counts in any sample
+```{r}
+gene_keep <- rowSums(count_matrix) > 0
+count_matrix <- count_matrix[gene_keep,]
+```
+
+
+## Log-transformation
+Scaled counts tend to have a skewed distribution. This can create spurious correlation patterns in the data. We could use correlation methods that are robust to skewness (Spearman, Kendall). For gene expression analysis, it's common to transform the data in ways that normalize the distribution, so we'll go through those steps.
+
+First, let's look at the distribution of GAPDH counts across samples:
+```{r}
+hist(count_matrix["GAPDH",], breaks=50)
+```
+
+Log-transformation is often used to pull in the distribution. Because there are some samples with 0 counts for genes, we can't just log everything because the log of 0 is undefined. The (sometimes questionable) trick that is used in a variety of fields is to add a *pseudocount* of 1 to every value. ie log(count + 1) for each value. This has the convenient property of log(1) = 0, so undetected values remain as 0 in the final quantification.
+
+We can apply the function to the entire matrix:
+
+```{r}
+count_matrix <- log(count_matrix + 1)
+#note: this can also be accomplished with the log1p() function
+```
+
+Now, let's look at GAPDH's distribution again
+```{r}
+hist(count_matrix["GAPDH",], breaks=50)
+```
+
+# Correlation
+Calculating correlations are easy in R. One caveat is that it will expect the variables to be in the columns of the matrix, *not* the rows. So let's transpose the matrix to do this:
+
+```{r}
+count_matrix <- t(count_matrix) #Easy!
+```
+
+We could calculate every gene-gene correlation in a single function if we wanted to by using the cor() function on the entire matrix. To reduce the computation here, we'll just do our gene of interest (ITGB4) vs. all genes.
+
+In the following code, we're feeding the cor() function two things to correlate: 1) A vector of ITGB4 values across patients and 2) the entire matrix. The function is smart enough to calculate (1) with each column of (2) separately. You could also feed it two individual genes if you wanted.
+
+```{r}
+itgb4_cor <- cor(count_matrix[,"ITGB4"], count_matrix, method="pearson")
+```
+
+This returns a single-row matrix of correlation values for ITGB4 vs. all genes. For viewing, I prefer to have a single-column matrix, so let's just transpose it
+
+```{r}
+itgb4_cor <- t(itgb4_cor)
+colnames(itgb4_cor) <- "Pearson"
+```
+
+And let's see the distribution of correlation coefficients
+```{r}
+hist(itgb4_cor, breaks=50)
+```
+
+Let's arrange the values and take a look at the results
+```{r}
+itgb4_cor <- itgb4_cor[rev(order(itgb4_cor[,"Pearson"])),]
+```
+
+Top 50 correlated genes
+```{r}
+head(itgb4_cor, 50)
+```
+
+Bottom 50
+```{r}
+tail(itgb4_cor, 50)
+```
+
+# Plot
+
+Let's make a gene-gene plot as an example.
+
+```{r}
+df <- data.frame(ITGB4 = count_matrix[,"ITGB4"],
+                 LAMB3 = count_matrix[,"LAMB3"])
+```
+
+```{r}
+cor_plot <- ggplot(df, aes(x=ITGB4, y=LAMB3)) +
+  geom_point(size=0.5, alpha=0.75, color="firebrick") +
+  geom_smooth(color="black") +
+  xlab("log(ITGB4)") + ylab("log(LAMB3)") +
+  theme_classic() +
+  theme(axis.text = element_text(size=12, color="black"),
+        axis.title = element_text(size=12))
+```
+
+```{r}
+cor_plot
+```
+You could save this plot with the ggsave function if interested!
+
+# Notes
+**General Disclaimer**: Here, we've used scaled counts as a quantification of a gene's expression. This is totally fine when your analysis doesn't depend on interpreting differences in these values between genes. However, if Gene A has an average expression of 10 scaled counts and Gene B has an average expression of 20, you cannot conclude that Gene A is expressed more highly. RNA molecules that are longer in length are fragmented into more pieces during library prep, and thus these quantifications are influenced by gene length. If Gene B is twice as long as Gene A in the example above, it will produce twice as many fragments and result in quantifications like in the example above. Other normalization strategies (TPM, RPKM/FPKM) control for this by normalizing to gene length. In this pipeline, TPM (transcripts per million) values can be calculated on the RSE object with the recount::getTPM() function.
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
