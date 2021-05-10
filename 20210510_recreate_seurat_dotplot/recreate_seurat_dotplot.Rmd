@@ -1,0 +1,166 @@
+---
+title: "Recreate Seurat's DotPlot"
+output: html_notebook
+---
+
+# Goal
+Seurat is an amazing tool to handle scRNA-seq data. Sometimes, however, it's nice to have a bit more customization over the data visualizations.
+
+Seurat's DotPlot() function pops up a lot in papers and in presentations I see. Let's code it outselves to increase the extent that we can customize its looks.
+
+# Dependencies
+```{r}
+library(Seurat)
+library(SeuratData)
+library(tidyverse)
+```
+
+# Load data
+For convenience, we'll use some datasets included in the [SeuratData](https://github.com/satijalab/seurat-data) package. 
+```{r}
+InstallData("pbmc3k")
+data("pbmc3k")
+seu <- pbmc3k
+```
+
+# Quick processing
+```{r}
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern = "^MT-*")
+```
+
+```{r}
+VlnPlot(seu, features=c("nFeature_RNA", "nCount_RNA", "percent.mt"))
+```
+
+```{r}
+seu <- subset(seu, subset = percent.mt <= 10)
+```
+
+```{r, message = 'hide'}
+seu <- NormalizeData(seu) #just to store log-transformed counts
+seu <- SCTransform(seu, vars.to.regress="percent.mt")
+seu <- RunPCA(seu, verbose=F)
+seu <- RunUMAP(seu, dims=1:35)
+seu <- FindNeighbors(seu, dims=1:35)
+seu <- FindClusters(seu, resolution=0.2)
+```
+
+```{r}
+DimPlot(seu, label=T)
+```
+
+# Dot plot
+People often plot the top *n* marker genes for each cell type/cluster. You can certainly grab these from the output of FindAllMarkers() or similar functions. But rather than getting a vector of gene symbols from that output,  we'll just make it outselves w/ common cell type markers:
+
+```{r}
+genes_to_plot <- c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ",
+                   "PPBP", "CD8A")
+```
+
+Let's get the scaled/log-transformed counts of these genes from the Seurat object
+
+```{r}
+exp_mat <- as.matrix(seu[["RNA"]]@data[genes_to_plot,])
+```
+
+Let's get cell metadata now
+
+```{r}
+meta <- seu@meta.data %>% 
+  select(seurat_clusters)
+```
+
+Merge in the expression data. Just need to transpose it so that cells are down the rows.
+```{r}
+meta <- bind_cols(meta, as.data.frame(t(exp_mat)))
+head(meta) #View the first few lies
+```
+
+To work with ggplot2, we need to get our data in [long/tidy format](https://r4ds.had.co.nz/tidy-data.html)
+
+```{r}
+meta <- pivot_longer(meta, -seurat_clusters, names_to="Gene", values_to="Expression")
+```
+
+Now, we have a very long table, where every cell-gene combination has its own row:
+```{r}
+head(meta)
+```
+
+The Seurat DotPlot's typically show the average expression for a gene in each cluster and the proportion of cells with non-zero expression. We'll make use of some handy [dplyr wrangling functions](https://dplyr.tidyverse.org)
+
+```{r}
+meta_summary <- meta %>%
+  group_by(seurat_clusters, Gene) %>%
+  summarise(Avg = mean(Expression),
+            Pct = sum(Expression > 0) / length(Expression) * 100)
+```
+
+We now have a new table that shows those summary stats for each gene/cluster.
+
+```{r}
+head(meta_summary)
+```
+
+## Plot function
+
+If you'd like to change the plot's appearance, just try modifying some of the options and see what happens
+
+```{r}
+dot_plot <- ggplot(meta_summary, aes(x=Gene, y=seurat_clusters)) +
+  geom_point(aes(size = Pct, fill = Avg), color="black", shape=21) +
+  scale_size("% detected", range = c(0,6)) +
+  scale_fill_gradientn(colours = viridisLite::mako(100),
+                       guide = guide_colorbar(ticks.colour = "black",
+                                              frame.colour = "black"),
+                       name = "Average\nexpression") +
+  ylab("Cluster") + xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=10, angle=45, hjust=1, color="black"),
+        axis.text.y = element_text(size=12, color="black"),
+        axis.title = element_text(size=14))
+```
+
+```{r}
+dot_plot
+```
+
+Note that, by default, ggplot2 will order your axes in the default factor order (alphabetical or numerical order). We can change the order by releveling the factor.
+
+I'm happy with the clusters going from 0-7, but let's re-order the genes.
+
+```{r}
+meta_summary$Gene <- factor(meta_summary$Gene, levels=genes_to_plot)
+```
+
+Re-run the plotting function
+
+```{r}
+dot_plot <- ggplot(meta_summary, aes(x=Gene, y=seurat_clusters)) +
+  geom_point(aes(size = Pct, fill = Avg), color="black", shape=21) +
+  scale_size("% detected", range = c(0,6)) +
+  scale_fill_gradientn(colours = viridisLite::mako(100),
+                       guide = guide_colorbar(ticks.colour = "black",
+                                              frame.colour = "black"),
+                       name = "Average\nexpression") +
+  ylab("Cluster") + xlab("") +
+  theme_bw() +
+  theme(axis.text.x = element_text(size=10, angle=45, hjust=1, color="black"),
+        axis.text.y = element_text(size=12, color="black"),
+        axis.title = element_text(size=14))
+```
+
+```{r}
+dot_plot
+```
+
+And save with ggplot2 if interested!
+
+I kind of like grid used in ggplot2's theme_bw() for visually parsing the plot. And now with this custom script, we can modify essentially all elements of the plot, from colors, to point sizes, outlines, labels, etc.
+
+# Session info
+```{r}
+sessionInfo()
+```
+
+
