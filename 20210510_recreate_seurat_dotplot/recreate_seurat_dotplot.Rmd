@@ -36,7 +36,7 @@ VlnPlot(seu, features=c("nFeature_RNA", "nCount_RNA", "percent.mt"))
 seu <- subset(seu, subset = percent.mt <= 10)
 ```
 
-```{r, message = 'hide'}
+```{r, results=FALSE, message=FALSE, warning=FALSE}
 seu <- NormalizeData(seu) #just to store log-transformed counts
 seu <- SCTransform(seu, vars.to.regress="percent.mt")
 seu <- RunPCA(seu, verbose=F)
@@ -121,7 +121,7 @@ dot_plot <- ggplot(meta_summary, aes(x=Gene, y=seurat_clusters)) +
         axis.title = element_text(size=14))
 ```
 
-```{r}
+```{r, fig.width=6.5, fig.height=4.25}
 dot_plot
 ```
 
@@ -150,11 +150,19 @@ dot_plot <- ggplot(meta_summary, aes(x=Gene, y=seurat_clusters)) +
         axis.title = element_text(size=14))
 ```
 
-```{r}
+```{r, fig.width=6.5, fig.height=4.25}
 dot_plot
 ```
 
 And save with ggplot2 if interested!
+```{r}
+ggsave(dot_plot,
+       filename="seurat_dotplot_recreated.png",
+       dpi=150,
+       width=6.5,
+       height=4.25)
+```
+
 
 I kind of like grid used in ggplot2's theme_bw() for visually parsing the plot. And now with this custom script, we can modify essentially all elements of the plot, from colors, to point sizes, outlines, labels, etc.
 
@@ -162,5 +170,6 @@ I kind of like grid used in ggplot2's theme_bw() for visually parsing the plot. 
 ```{r}
 sessionInfo()
 ```
+
 
 
