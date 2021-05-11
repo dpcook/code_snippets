@@ -1,0 +1,88 @@
+---
+title: "UMAP with sample density"
+output: html_notebook
+---
+
+# Goal
+Take a seurat object and make a custom UMAP panels showing the density of each sample throughout the UMAP embedding.
+
+# Dependencies
+```{r, results='hide'}
+library(Seurat)
+library(tidyverse)
+library(viridisLite)
+```
+
+# Load the data
+We'll look at a scRNA-seq time course of the prostate cancer cell line DU145 treated with TGFB1 for different lengths of time. This data is originally from [this paper](https://www.nature.com/articles/s41467-020-16066-2), but we'll download it from Figshare:
+
+```{r}
+seu <- readRDS(gzcon(url("https://ndownloader.figshare.com/files/27965040")))
+```
+
+```{r}
+DimPlot(seu, group.by="Sample", reduction='umap_pseudo')
+```
+
+# Density plot
+We'll get the relevant data into a data frame. We just need the meta.data table and UMAP embeddings
+```{r}
+dat <- data.frame(seu@meta.data)
+dat$UMAP1 <- Embeddings(seu, "umap_pseudo")[,1]
+dat$UMAP2 <- Embeddings(seu, "umap_pseudo")[,2]
+```
+
+Our plot will consistent of two elements: individual points that will all be the same color, and the layer containing each sample's density on the plot.
+
+```{r}
+#Create a data frame that doesn't contain a "sample" column. This will allow us to facet the density layer without affecting the points
+dat_bg <- dat[,-(which(colnames(dat)=="Sample"))]
+```
+
+And the sample names are long right now, so I'll just trim them:
+```{r}
+dat$Sample <- gsub("DU145_TGFB1_", "", dat$Sample)
+dat$Sample <- factor(dat$Sample, levels=c("0d", "8h", "1d", "3d", "7d", "8h_rm", "1d_rm", "3d_rm"))
+```
+
+
+Now we're ready to plot
+
+```{r}
+density_plot <- ggplot(dat, aes(x=UMAP1, y=UMAP2)) +
+  stat_density_2d(geom="raster", aes(fill=stat(ndensity)), contour=F) + #ndensity calculates the normalized density for each sample--otherwise density would be affected by the number of cells for each sample, which is variable
+  geom_point(data=dat_bg, shape=16, size=0.1, alpha=0.2, color="white") +
+  scale_fill_gradientn(colours=viridisLite::mako(100), name="Density") +
+  scale_x_continuous(expand=c(0,0)) +
+  scale_y_continuous(expand=c(0,0)) +
+  facet_wrap(~Sample, ncol=8) +
+  theme_classic() +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size=12, color="black"),
+        axis.text=element_blank(),
+        axis.title=element_blank(),
+        axis.ticks=element_blank(),
+        axis.line = element_blank(),
+        plot.background = element_rect(fill = "transparent", color = NA),
+        legend.text=element_text(size=12, color="black"),
+        legend.title=element_text(size=14, color="black"))
+```
+
+```{r, fig.width=10, fig.height=1.8}
+density_plot
+```
+
+Save image
+```{r}
+ggsave(density_plot,
+       filename="umap_sample_density.png",
+       dpi=150,
+       width=10, height=1.8)
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
+
