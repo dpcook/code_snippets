@@ -1,0 +1,174 @@
+---
+title: "Identifying cell state programs with NMF"
+output: html_notebook
+---
+
+# Goal 
+We'll explore non-negative matrix factorization (NMF) as a strategy to identify coordinated gene expression programs in scRNA-seq data. What I like about this approach is that unlike clustering, it handles continuous sources of heterogeneity (eg. phenotypic gradients) quite well and individual cells can be associated with >1 program (eg. a cell identity program, inflammation program, cell cycle program, etc)
+
+In this case, the goal of NMF is to decompose a gene expression matrix into two matrices: a program-by-cell usage/activity matrix (ie. the relative activity level of an expression program in each cell), and a gene-by-program weight matrix (ie. the contribution of each gene to each program). We use the activity matrix to summarize expression patterns in cells, and the weight matrix to understand the individual programs.
+
+There's plenty of background reading you can (and should) do about NMF--I won't get into many details here. However, the non-negative nature of NMF is convenient for gene expression data. Given the lack of negative program activities and gene weights, the results become interpretable as additive "parts of a whole". See the [original NMF paper](https://www.nature.com/articles/44565) for some good exmaples of this.
+
+Here, we'll be using the implementation of NMF by [DeBruine et al](https://www.biorxiv.org/content/10.1101/2021.09.01.458620v1.full.pdf), implemented in the [RcppML package](https://www.github.com/zdebruine/RcppML/). Their implementation ensures reproducible factorizations and (while not shown in this demo), includes regularization strategies that allow tunable sparsity.
+
+# Dependencies
+```{r, results='hide'}
+library(Seurat)
+library(SeuratData)
+library(tidyverse)
+library(ggrastr)
+library(RcppML) #NMF function
+library(Matrix)
+```
+
+# Load the data
+For convenience, we'll use some datasets included in the [SeuratData](https://github.com/satijalab/seurat-data) package. 
+```{r}
+InstallData("pbmc3k")
+data("pbmc3k")
+seu <- pbmc3k
+```
+
+# Quick processing
+Just standard processing going from a raw UMI count matrix to normalized data, embedded with UMAP and clustered. While we do cluster the data here, this type of analysis can be preformed without clustering.
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+seu[["percent.mt"]] <- PercentageFeatureSet(seu, pattern = "^MT-*")
+seu <- subset(seu, subset = percent.mt <= 10)
+seu <- NormalizeData(seu) #just to store log-transformed counts
+seu <- SCTransform(seu, vars.to.regress="percent.mt")
+seu <- RunPCA(seu, verbose=F)
+seu <- RunUMAP(seu, dims=1:30)
+seu <- FindNeighbors(seu, dims=1:30)
+seu <- FindClusters(seu, resolution=0.25)
+```
+
+```{r}
+DimPlot(seu, label=T)
+```
+
+# Iterative NMF to get appropriate rank
+An challenge with matrix factorization approaches is selecting an appropriate rank. Unlike PCA, which inherently produces as many principle components as input features, the number of resulting programs from NMF is a user-defined parameter. As recommended by [DeBruine et al](https://www.biorxiv.org/content/10.1101/2021.09.01.458620v1.full.pdf), we can iteratively run NMF with increasing rank and evaluate the resulting error. Similar to identifying the number of PCs to adequately represent our data, we can use an "elbow" heuristic and identify when increasing rank begins to produce diminishing returns in model accuracy.
+
+```{r}
+errors <- c() 
+ranks <- seq(1, 50, 3) #test ranks 1 through 50 in increments of 3
+var_genes <- VariableFeatures(seu) #we'll only run NMF on the variable features
+
+for(i in ranks){ 
+  cat("rank: ", i, "\n")
+  model <- RcppML::nmf(seu[["RNA"]]@data[var_genes,], i, tol = 1e-3)
+  mse_i <- mse(seu[["RNA"]]@data[var_genes,], model$w, model$d, model$h)
+  errors <- c(errors, mse_i) 
+}
+```
+
+```{r}
+error_dat <- data.frame(Rank = ranks,
+                  MSE = errors)
+
+qplot(error_dat$Rank, error_dat$MSE) + geom_vline(xintercept = 12, linetype=2, color="firebrick", size=1) +
+  xlab("Rank (k)") + ylab("MSE") + ggtitle ("NMF error") + theme_bw()
+```
+
+NMF doesn't tend to get such a strong elbow compared to the scree plots used for PCA. I usually look for the point around where the error starts to follow a linear slope. Around 12 or so here.
+
+# Run NMF with k=12
+```{r}
+model <- nmf(seu[["RNA"]]@data[var_genes,],
+             k=12, seed = 999, tol=1e-5)
+```
+
+
+# Visualize program "activities"
+```{r}
+df <- data.frame(UMAP1 = Embeddings(seu, 'umap')[,1],
+                UMAP2 = Embeddings(seu, 'umap')[,2])
+
+nmf <- t(model$h)
+colnames(nmf) <- paste0("NMF", 1:12)
+rownames(nmf) <- colnames(seu)
+df <- cbind(df, nmf)
+```
+
+```{r}
+plotPrograms <- function(program){
+  df[,program] <- df[,program] / max(df[,program]) #rescale activities from 0-1 for consistency
+  prog_plot <- ggplot(df, aes(x=UMAP1, y=UMAP2)) +
+    geom_point_rast(size=0.1, shape=16, alpha=0.75, aes_string(color=program)) +
+    scale_color_gradientn(colours=c("lightgrey", "red"),
+                          name=paste0(program, " program\nactivity"),
+                          guide = guide_colorbar(ticks.colour = "black",
+                                              frame.colour = "black",
+                                               barwidth=0.75)) +
+    ggtitle(program) +
+    theme_void() +
+    theme(legend.title=element_text(size=12),
+          legend.text=element_text(size=12),
+          legend.position="none") #this last line removes color scale just to plot cleanly below. Remove this in practice
+  
+  return(prog_plot)
+}
+```
+
+```{r}
+plot_list <- lapply(paste0("NMF", 1:12),
+                    plotPrograms)
+```
+
+```{r}
+cowplot::plot_grid(plotlist = plot_list, ncol=3)
+```
+
+This may not render nicely in this notebook, but if you adjust the plot dimensions and save it, it should look cleaner
+
+# Exploring one of the programs
+NMF4 seems to be a continuous program within the monocyte population. Let's explore it a bit
+
+What genes are associated with it?
+```{r}
+gene_weights <- model$w
+colnames(gene_weights) <- paste0("NMF", 1:12)
+rownames(gene_weights) <- var_genes
+```
+
+```{r}
+#ugly code to just print top weighted genes for NMF4
+head(gene_weights[rev(order(gene_weights[,4])),])
+```
+
+Let's look at a few of these
+```{r}
+FeaturePlot(seu, features=c("S100A4", "LTB", "IL32"), ncol=3)
+```
+
+Great, their expression matches NMF4 pretty well. Note that some of these genes iare also expressed in other populations. These weights don't necessarily mean they're specific markers (eg. You'll see LTB also has a high weight for NMF4, which is associated with the bottom populations). You could explore strategies to transform these values to prioritize specificity. 
+
+```{r}
+nmf4_plot <- plotPrograms("NMF4")
+nmf4_plot
+```
+
+
+Let's make a gene list of top-weighted genes
+```{r}
+hist(gene_weights[,4], breaks=50)
+abline(v=0.001)
+```
+
+We'll use a (relatively arbitrary) cutoff of 0.001 based on the distribution
+
+```{r}
+nmf4_genes <- rownames(gene_weights)[gene_weights[,4] > 0.001]
+length(nmf4_genes)
+head(nmf4_genes, n=50)
+```
+
+We could then use this as an input for various other analysis (gene set enrichment, query gene set for ligand-receptor analysis, etc)
+
+# Session info
+```{r}
+sessionInfo()
+```
+
