@@ -1,1 +1,1 @@
-# code_snippets
+# Code snippets from https://www.dpcook.com/code-snippets
