@@ -1,0 +1,121 @@
+---
+title: "Seurat's FeaturePlot from scratch"
+output: github_document
+---
+
+# Goal
+Seurat is an amazing tool to handle scRNA-seq data. When preparing plots for publication, it can be nice to have a bit more control over the plot. I'm a big fan of ggplot2, which is the plotting tool Seurat uses under the hood. Here I'll use it to rebuild the standard FeaturePlot().
+
+# Dependencies
+```{r}
+library(Seurat)
+library(SeuratData)
+library(tidyverse) #loads ggplot2
+library(ggrastr)
+options(ggrastr.default.dpi=300)
+```
+
+# Load data
+For convenience, we'll use some datasets included in the [SeuratData](https://github.com/satijalab/seurat-data) package. 
+```{r}
+InstallData("pbmc3k")
+data("pbmc3k")
+seu <- pbmc3k
+```
+
+## Quick processing
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+seu <- NormalizeData(seu) #just to store log-transformed counts
+seu <- SCTransform(seu)
+seu <- RunPCA(seu, verbose=F)
+seu <- RunUMAP(seu, dims=1:30)
+seu <- FindNeighbors(seu, dims=1:30)
+seu <- FindClusters(seu, resolution=0.2)
+```
+
+```{r}
+DimPlot(seu, label=T)
+```
+
+# Seurat's FeaturePlot
+To its credit, Seurat's FeaturePlot does have a reasonable amount of customizability (see the function's help menu with ?FeaturePlot). However, I find I hit walls when trying to get the aesthetics just right for presentations/publications
+
+```{r}
+DefaultAssay(seu) <- "RNA" #we'll visualize the log-transformed counts
+```
+
+
+```{r}
+#Default parameters
+FeaturePlot(seu, features="CD3E")
+```
+
+So this is totally fine. But if I was getting picky, there are a few things I would change (in no particular order):
+- Remove underscores in the axis titles
+- Maybe remove the axes all together for a cleaner visualization
+- I'm not a fan of the grey-to-blue color map
+- I'm not crazy about the white ticks ggplot2 uses in the legend by default
+- I typically don't like bold text the plots (the title), and I've seen at least one journal not allow it
+- Add legend title (what are we quantifying??)
+- Would also be nice to have freedom to modify point size/transparency, and relative font sizes.
+
+# Custom FeaturePlot with ggplot2
+Ggplot2 takes a data frame as input. For this plot, the only variables we need are the embedding coordinates and the expression values of a given gene. Note that this could be extended to mimick the categorical DimPlot function by replacing expression values with some categorical data (eg. cluster)
+
+Ggplot2 code can be lengthy, so I'll write the plotting code up as a function that takes a gene symbol as input. That way we can just re-use the code for as many genes as we want.
+
+```{r}
+plotGene <- function(gene){
+  exp_dat <- data.frame(UMAP1 = Embeddings(seu, "umap")[,1],
+                        UMAP2 = Embeddings(seu, "umap")[,2],
+                        Expression = seu[["RNA"]]@data[gene,]) #pulls log-transformed scaled counts out
+  
+  # The commented out code in the next line orders the data frame from lowest to highest expression
+  # As a result, the highest expressing cells get added to the "top" of the plot
+  # This is common and is sometimes helpful, but given how over-plotted many UMAP plots are,
+  # this could give false impressions about the distribution of the gene's expression.
+  # Remove hash below if you want, but use with caution:
+  #exp_dat <- exp_dat[order(exp_dat$Expression),]
+  
+  exp_plot <- ggplot(exp_dat, aes(x=UMAP1, y=UMAP2)) +
+    geom_point_rast( #this comes from ggrastr--rasterizes the points to avoid large vector graphics
+      size=0.25, #make smaller when working with more cells
+      shape=16, #uses a specific point shape that doesn't have an outline
+      alpha=0.75, # a little transparency helps with overplotting
+      aes(color=Expression)) +
+    scale_color_gradientn(colours=c("lightgrey", rev(viridis::inferno(100))), #inferno for non-zero values
+                          name="log(TP10k)",
+                          guide = guide_colorbar(ticks.colour = "black",
+                                              frame.colour = "black",
+                                               barwidth=0.75)) +
+    ggtitle(gene) +
+    theme_classic() +
+    theme(axis.text = element_text(size=10, color="black"),
+          axis.title = element_text(size=12),
+          legend.text = element_text(size=10),
+          legend.title = element_text(size=10),
+          plot.title = element_text(size=14, face = "italic"))
+  return(exp_plot)
+}
+```
+
+Let's try it out
+
+```{r}
+plotGene("CD3E")
+```
+
+Looks good! All of those plot elements can be modified to fit your taste.
+
+## Save plot
+```{r}
+p1 <- plotGene("CD3E")
+ggsave(p1, filename="./umap_expression_cd3e.pdf",
+       width=3.25, height=2.5)
+```
+
+# Session Info
+```{r}
+sessionInfo()
+```
+
